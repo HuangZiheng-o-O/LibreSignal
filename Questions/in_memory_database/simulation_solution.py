@@ -1,155 +1,118 @@
 class InMemoryDatabase:
     def __init__(self):
-        # For level 1 key: {field: value}
-        self.database = {}
-        # For level 4 backup storage:
-        # To store all the backup timestamps for quick lookup of the latest 
-        # backup before a restore timestamp
-        self.backup_timestmps: list[int] = []
-        # To store the actual backup database
-        self.backup_states: list[dict] = []
+        # data[key][field] = (value, expire_at)，expire_at=None 表示永不过期
+        self.data = {}
+        # backups = [(backup_time, snapshot)]；snapshot 中保存的是“剩余 TTL”
+        self.backups = []
 
-    # Level 1
+    @staticmethod
+    def _alive(item, timestamp):
+        """字段在 timestamp 时是否仍有效；TTL 区间为 [start, expire_at)。"""
+        return item is not None and (item[1] is None or int(timestamp) < item[1])
+
+    @staticmethod
+    def _format(fields):
+        """按字段名字典序输出。"""
+        return ", ".join(f"{field}({value})" for field, value in sorted(fields))
+
+    # ========== Level 1 ==========
     def set(self, key, field, value):
-        """
-        The following implementation is sufficient for Level 1 and Level 2, 
-        but will need to be modified for Level 3 to handle expiry times.
-        """
-        # if key not in self.database:
-        #     self.database[key] = {}
-        # self.database[key][field] = value
-        # return ""
-        
-        # Implementation for Level 3:
-        return self._set_internal(key, field, value, None)
-    
+        self.data.setdefault(key, {})[field] = (value, None)
+        return ""
+
     def get(self, key, field):
-        if key not in self.database or field not in self.database[key]:
-            return ""
-        # Implementation for Level 1 and 2:
-        # return self.database[key][field]
-        
-        # Implementation for Level 3:
-        return self.database[key][field][0]
+        item = self.data.get(key, {}).get(field)
+        return item[0] if item is not None else ""
 
     def delete(self, key, field):
-        if key not in self.database or field not in self.database[key]:
+        record = self.data.get(key)
+        if record is None or field not in record:
             return "false"
-        del self.database[key][field]
+        del record[field]
+        if not record:
+            del self.data[key]
         return "true"
 
-    # Level 2
+    # ========== Level 2 ==========
     def scan(self, key):
-        if key not in self.database:
-            return ""
-        items = list(self.database[key].items())
-        # Sort by field name in lexicographical order
-        items.sort()  
-        # Implementation for Level 1 and 2:
-        # return ", ".join(f"{field}({value})" for field, value in items)
-
-        # Implementation for Level 3:
-        return ", ".join(f"{field}({value[0]})" for field, value in items)
+        record = self.data.get(key, {})
+        return self._format((field, item[0]) for field, item in record.items())
 
     def scan_by_prefix(self, key, prefix):
-        if key not in self.database:
-            return ""
-        items = [(field, value) for field, value in self.database[key].items() if field.startswith(prefix)]
-        # Sort by field name in lexicographical order
-        items.sort()  
-        # Implementation for Level 1 and 2:
-        # return ", ".join(f"{field}({value})" for field, value in items)
-    
-        # Implementation for Level 3:
-        return ", ".join(f"{field}({value[0]})" for field, value in items)
-    
-    # Level 3
-    # Helper function for setting a field with an expiry time
-    def _set_internal(self, key, field, value, expiry):
-        if key not in self.database:
-            self.database[key] = {}
-        self.database[key][field] = (value, expiry)
-        return ""
-    
+        record = self.data.get(key, {})
+        return self._format(
+            (field, item[0]) for field, item in record.items()
+            if field.startswith(prefix)
+        )
+
+    # ========== Level 3 ==========
     def set_at(self, key, field, value, timestamp):
-        return self._set_internal(key, field, value, expiry=None)
+        # 无 TTL 的写入会清除该字段原有的过期时间
+        self.data.setdefault(key, {})[field] = (value, None)
+        return ""
 
     def set_at_with_ttl(self, key, field, value, timestamp, ttl):
-        expiry = timestamp + ttl
-        return self._set_internal(key, field, value, expiry)    
+        timestamp, ttl = int(timestamp), int(ttl)
+        self.data.setdefault(key, {})[field] = (value, timestamp + ttl)
+        return ""
 
     def delete_at(self, key, field, timestamp):
-        if key not in self.database or field not in self.database[key]:
+        record = self.data.get(key)
+        item = None if record is None else record.get(field)
+        if not self._alive(item, timestamp):
             return "false"
-        if not self._is_alive(key, field, timestamp):
-            return "false"
-        del self.database[key][field]
-        return "true"
+        return self.delete(key, field)
 
-    def _is_alive(self, key, field, timestamp):
-        if key not in self.database or field not in self.database[key]:
-            return False
-        value, expiry = self.database[key][field]
-        if expiry is None:
-            return True
-        return timestamp < expiry
-    
     def get_at(self, key, field, timestamp):
-        if not self._is_alive(key, field, timestamp):
-            return ""
-        return self.database[key][field][0]
+        item = self.data.get(key, {}).get(field)
+        return item[0] if self._alive(item, timestamp) else ""
 
     def scan_at(self, key, timestamp):
-        if key not in self.database:
-            return ""
-        items = []
-        for field, (value, expiry) in self.database[key].items():
-            if self._is_alive(key, field, timestamp):
-                items.append((field, value))
-        items.sort()
-        return ", ".join(f"{field}({value})" for field, value in items)
+        return self._scan_at(key, "", timestamp)
 
     def scan_by_prefix_at(self, key, prefix, timestamp):
-        if key not in self.database:
-            return ""
-        items = []
-        for field, (value, expiry) in self.database[key].items():
-            if field.startswith(prefix) and self._is_alive(key, field, timestamp):
-                items.append((field, value))
-        items.sort()
-        return ", ".join(f"{field}({value})" for field, value in items)
-    
+        return self._scan_at(key, prefix, timestamp)
+
+    def _scan_at(self, key, prefix, timestamp):
+        record = self.data.get(key, {})
+        return self._format(
+            (field, item[0]) for field, item in record.items()
+            if field.startswith(prefix) and self._alive(item, timestamp)
+        )
+
+    # ========== Level 4 ==========
     def backup(self, timestamp):
-        # Create a backup of the current database state, including remaining lifespans for all records and fields
-        # key: {field: (value, remaining_lifespan)}
-        state = {}
-        for key, field in self.database.items():
-            for field, (value, expiry) in field.items():
-                if self._is_alive(key, field, timestamp):
-                    # Calculate remaining lifespan and save it in the backup
-                    # None means no expiry
-                    remaining_lifespan = expiry - timestamp if expiry is not None else None
-                    # Save the key, field, value, and remaining lifespan in the backup state
-                    if key not in state:
-                        state[key] = {}
-                    state[key][field] = (value, remaining_lifespan)
-        self.backup_timestmps.append(timestamp)
-        self.backup_states.append(state)
-        # Return the number of non-empty non-expired records (the number of keys) in the database
-        return str(len(state))
-    
+        timestamp = int(timestamp)
+        snapshot = {}
+
+        for key, record in self.data.items():
+            saved = {}
+            for field, item in record.items():
+                if self._alive(item, timestamp):
+                    value, expire_at = item
+                    # 保存剩余 TTL，恢复时再以恢复时间为起点重算
+                    remaining = None if expire_at is None else expire_at - timestamp
+                    saved[field] = (value, remaining)
+            if saved:
+                snapshot[key] = saved
+
+        self.backups.append((timestamp, snapshot))
+        return str(len(snapshot))
+
     def restore(self, timestamp, timestampToRestore):
-        import bisect
-        # Find the latest backup before timestampToRestore
-        idx = bisect.bisect_right(self.backup_timestmps, timestampToRestore) - 1
-        backup_state = self.backup_states[idx]
-        # Restore the database state from the backup, recalculating expiry times based on the current timestamp
-        self.database = {}
-        for key, fields in backup_state.items():
-            for field, (value, remaining_lifespan) in fields.items():
-                expiry = None
-                # If the field had a remaining lifespan in the backup, we need to recalculate its expiry time based on the current timestamp
-                if remaining_lifespan is not None:
-                    expiry = timestamp + remaining_lifespan
-                self._set_internal(key, field, value, expiry)
+        timestamp, target = int(timestamp), int(timestampToRestore)
+
+        # 时间单调递增，倒序找到 target 时刻之前（含该时刻）的最近备份
+        for backup_time, snapshot in reversed(self.backups):
+            if backup_time <= target:
+                self.data = {
+                    key: {
+                        field: (value, None if remaining is None else timestamp + remaining)
+                        for field, (value, remaining) in record.items()
+                    }
+                    for key, record in snapshot.items()
+                }
+                return ""
+
+        # 题目保证一定存在可恢复的备份；保留兜底以维持返回约定
         return ""
