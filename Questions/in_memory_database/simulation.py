@@ -1,5 +1,7 @@
-"""
-All your implementation code for the bank system simulation goes here.
+"""In-Memory Database 四层练习的空白实现。
+
+按下方 Level 1 → 4 的顺序补方法；进入 Level 3 时需要让字段支持 TTL，
+进入 Level 4 时再加入备份与恢复。各层题面见同目录 level1.md 至 level4.md。
 """
 class InMemoryDatabase:
     def __init__(self):
